@@ -314,12 +314,6 @@ class TransparentRedisProxy:
                 
         except Exception:
             pass
-        finally:
-            try:
-                source.close()
-                destination.close()
-            except:
-                pass
 
     def handle_client(self, client_socket: socket.socket, client_addr):
         """Handle a client connection with transparent proxying"""
