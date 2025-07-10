@@ -10,6 +10,7 @@ import logging
 import time
 import os
 import subprocess
+import queue
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -39,6 +40,7 @@ class Config:
         redis_port: Optional[int],
         redis_username: Optional[str],
         redis_password: Optional[str],
+        redis_pool_size: int,
     ):
         self.proxy_password = proxy_password
         self.proxy_port = proxy_port
@@ -49,6 +51,7 @@ class Config:
         self.redis_port = redis_port
         self.redis_username = redis_username
         self.redis_password = redis_password
+        self.redis_pool_size = redis_pool_size
 
 def load_config() -> Config:
     """
@@ -85,6 +88,7 @@ def load_config() -> Config:
         raise ConfigError("Redis upstream credentials are missing. Set REDIS_URL or REDIS_HOST and REDIS_PORT.")
 
     redis_port = int(redis_port_str) if redis_port_str else None
+    pool_size = int(os.getenv("REDIS_POOL_SIZE", "10"))
 
     return Config(
         proxy_password=proxy_password,
@@ -96,49 +100,107 @@ def load_config() -> Config:
         redis_port=redis_port,
         redis_username=redis_username,
         redis_password=redis_password,
+        redis_pool_size=pool_size,
     )
 
 # --- Logging ---
 
+def get_log_level() -> int:
+    """Get log level from environment variable with fallback to INFO"""
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL
+    }
+    return log_levels.get(log_level_str, logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=get_log_level(),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class SocketPool:
+    """Simple socket pool for upstream Redis connections."""
+    def __init__(self, host: str, port: int, size: int):
+        self.host = host
+        self.port = port
+        self.size = size
+        self.pool = queue.Queue(maxsize=size)
+
+    def get(self) -> socket.socket:
+        try:
+            sock = self.pool.get_nowait()
+            logger.debug(f"Reused pooled socket {sock.fileno()} for {self.host}:{self.port}")
+            return sock
+        except queue.Empty:
+            logger.debug(f"Pool empty, creating new socket for {self.host}:{self.port}")
+            # Determine address family based on host
+            try:
+                # Try IPv6 first if host contains colons (IPv6 address)
+                if ':' in self.host:
+                    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    logger.debug(f"Created IPv6 socket for {self.host}:{self.port}")
+                else:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    logger.debug(f"Created IPv4 socket for {self.host}:{self.port}")
+                sock.settimeout(10)
+                sock.connect((self.host, self.port))
+                logger.info(f"New upstream connection established: {sock.fileno()} -> {self.host}:{self.port}")
+                return sock
+            except socket.error as e:
+                logger.warning(f"Primary address family failed for {self.host}:{self.port}: {e}")
+                # Fallback to the other address family
+                try:
+                    if ':' in self.host:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        logger.debug(f"Fallback to IPv4 socket for {self.host}:{self.port}")
+                    else:
+                        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                        logger.debug(f"Fallback to IPv6 socket for {self.host}:{self.port}")
+                    sock.settimeout(10)
+                    sock.connect((self.host, self.port))
+                    logger.info(f"Fallback upstream connection established: {sock.fileno()} -> {self.host}:{self.port}")
+                    return sock
+                except socket.error as fallback_error:
+                    logger.error(f"Both IPv4 and IPv6 failed for {self.host}:{self.port}: {fallback_error}")
+                    raise
+
+    def release(self, sock: socket.socket):
+        try:
+            if self.pool.qsize() < self.size:
+                self.pool.put_nowait(sock)
+                logger.debug(f"Returned socket {sock.fileno()} to pool (pool size: {self.pool.qsize()}/{self.size})")
+            else:
+                sock.close()
+                logger.debug(f"Pool full, closed socket {sock.fileno()} (pool size: {self.pool.qsize()}/{self.size})")
+        except Exception as e:
+            logger.warning(f"Error releasing socket {sock.fileno()}: {e}")
+            sock.close()
 
 # --- Transparent Proxy ---
 
 class TransparentRedisProxy:
     def __init__(self, config: Config):
         self.config = config
+        # Initialize socket pool for upstream Redis
+        self.socket_pool = SocketPool(
+            host=self.config.redis_host,
+            port=self.config.redis_port,
+            size=self.config.redis_pool_size,
+        )
         
     def connect_upstream(self) -> Optional[socket.socket]:
-        """Create connection to upstream Redis server."""
+        """Borrow connection to upstream Redis server from pool."""
         try:
-            host = self.config.redis_host
-            port = self.config.redis_port
-            
-            logger.info(f"Attempting to connect to upstream Redis at {host}:{port}")
-            
-            addr_info = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
-            
-            for family, socktype, proto, canonname, sockaddr in addr_info:
-                try:
-                    upstream = socket.socket(family, socktype, proto)
-                    upstream.settimeout(10)
-                    upstream.connect(sockaddr)
-                    logger.info(f"Successfully connected to upstream Redis at {sockaddr}")
-                    return upstream
-                except Exception as e:
-                    logger.warning(f"Failed to connect to {sockaddr}: {e}")
-                    if upstream:
-                        upstream.close()
-            
-            logger.error(f"Failed to connect to upstream Redis at {host}:{port}")
-            return None
-
+            sock = self.socket_pool.get()
+            logger.debug(f"Borrowed upstream socket {sock.fileno()} from pool")
+            return sock
         except Exception as e:
-            logger.error(f"Failed to connect to upstream Redis: {e}")
+            logger.error(f"Failed to get upstream connection from pool: {e}")
             return None
 
     def get_redis_password(self) -> str:
@@ -293,9 +355,16 @@ class TransparentRedisProxy:
         except Exception as e:
             logger.error(f"Error handling client {client_addr}: {e}")
         finally:
+            # Clean up client socket
             try:
                 client_socket.close()
-                upstream.close()
+            except:
+                pass
+            # Return upstream socket to pool
+            try:
+                if upstream:
+                    self.socket_pool.release(upstream)
+                    logger.debug(f"Returned upstream socket {upstream.fileno()} to pool")
             except:
                 pass
 

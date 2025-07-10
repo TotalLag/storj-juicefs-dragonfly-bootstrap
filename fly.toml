@@ -11,6 +11,8 @@ primary_region = 'iad'
 
 [env]
   PORT = "8080"
+  LOG_LEVEL = "DEBUG"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  
   # Set these environment variables using: fly secrets set VARIABLE_NAME=value
   # STORJ_ACCESS_KEY = "your-storj-access-key"
   # STORJ_SECRET_KEY = "your-storj-secret-key"
