@@ -1,0 +1,64 @@
+# fly.toml app configuration file generated for storj-bootstrap-worker on 2025-07-09T17:36:52-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'storj-bootstrap-worker'
+primary_region = 'iad'
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  # Set these environment variables using: fly secrets set VARIABLE_NAME=value
+  # STORJ_ACCESS_KEY = "your-storj-access-key"
+  # STORJ_SECRET_KEY = "your-storj-secret-key"
+  # STORJ_BUCKET_URL = "your-storj-bucket-url"
+  
+  # Redis Proxy Configuration (REQUIRED for proxy process)
+  PROXY_PASSWORD = "your-secure-proxy-password"
+  # REDIS_URL = "redis://username:password@host:port"  # This should already be set if using Fly Upstash else Set via: fly secrets set REDIS_URL=your-redis-url
+
+[processes]
+  app = 'python src/proxy.py'
+  web = 'gunicorn src.proxy:app --bind 0.0.0.0:8080'
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  processes = ["web"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["http", "tls"]
+
+  [[services.health_checks]]
+    type = "http"
+    interval = "10s"
+    timeout = "2s"
+    path = "/up"
+    grace_period = "1s"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 6379
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 6379
+
+  [[services.health_checks]]
+    type = "tcp"
+    interval = "10s"
+    timeout = "2s"
+    port = 6379
+    grace_period = "1s"
+
+[[vm]]
+  size = 'shared-cpu-1x'
