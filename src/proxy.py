@@ -27,6 +27,7 @@ class AsyncRedisProxy:
             config=config,
         )
         self.auth_interceptor = AuthInterceptor(config)
+        self.metrics = None
         self._shutdown = False
         self._connection_counter = 0
         self._connection_lock = asyncio.Lock()
@@ -40,6 +41,16 @@ class AsyncRedisProxy:
     async def initialize(self):
         """Initialize the proxy and its components."""
         await self.connection_pool.initialize()
+    
+    def set_metrics(self, metrics):
+        """Set the metrics instance after it's been initialized."""
+        self.metrics = metrics
+        try:
+            from .metrics import get_metrics
+            self.metrics = get_metrics()
+        except ImportError:
+            logger.warning("Metrics module not available")
+            self.metrics = None
     
     async def shutdown(self):
         """Shutdown the proxy and cleanup resources."""
@@ -63,14 +74,6 @@ class AsyncRedisProxy:
                           direction: str, intercept_auth: bool = False):
         """Forward data between streams with optional AUTH interception"""
         try:
-            # Get metrics instance for data transfer recording
-            metrics = None
-            try:
-                from .metrics import get_metrics
-                metrics = get_metrics()
-            except ImportError:
-                pass
-            
             while not self._shutdown:
                 # Use asyncio.wait_for for timeout control
                 try:
@@ -79,11 +82,11 @@ class AsyncRedisProxy:
                         break
                     
                     # Record data transfer metrics
-                    if metrics:
+                    if self.metrics:
                         if "client->server" in direction:
-                            metrics.record_bytes_transferred(len(data), 'client_to_server')
+                            self.metrics.record_bytes_transferred(len(data), 'client_to_server')
                         elif "server->client" in direction:
-                            metrics.record_bytes_transferred(len(data), 'server_to_client')
+                            self.metrics.record_bytes_transferred(len(data), 'server_to_client')
                     
                     if intercept_auth and direction == "client->server":
                         data, was_intercepted = self.auth_interceptor.intercept_auth_command(data)
@@ -115,13 +118,8 @@ class AsyncRedisProxy:
         connection_start_time = time.time()
         
         # Record metrics
-        try:
-            from .metrics import get_metrics
-            metrics = get_metrics()
-            if metrics:
-                metrics.record_connection_accepted()
-        except ImportError:
-            pass  # Metrics not available
+        if self.metrics:
+            self.metrics.record_connection_accepted()
         
         logger.info(f"New client connection #{connection_id} from {client_addr} (pool: {pool_stats['pool_size']}/{pool_stats['max_size']}, active connections: {connection_id})")
         
@@ -130,12 +128,9 @@ class AsyncRedisProxy:
             logger.error(f"Failed to connect to upstream for client #{connection_id} {client_addr}")
             
             # Record metrics for failed connection
-            try:
-                if metrics:
-                    metrics.record_error('connection_error')
-                    metrics.record_connection_closed(time.time() - connection_start_time)
-            except:
-                pass
+            if self.metrics:
+                self.metrics.record_error('connection_error')
+                self.metrics.record_connection_closed(time.time() - connection_start_time)
             
             client_writer.close()
             await client_writer.wait_closed()
@@ -167,19 +162,13 @@ class AsyncRedisProxy:
             logger.error(f"Error handling client #{connection_id} {client_addr}: {e}")
             
             # Record error metrics
-            try:
-                if metrics:
-                    metrics.record_error('forwarding_error')
-            except:
-                pass
+            if self.metrics:
+                self.metrics.record_error('forwarding_error')
         finally:
             # Record connection closed metrics
             connection_duration = time.time() - connection_start_time
-            try:
-                if metrics:
-                    metrics.record_connection_closed(connection_duration)
-            except:
-                pass
+            if self.metrics:
+                self.metrics.record_connection_closed(connection_duration)
             
             # Clean up client connection
             try:
@@ -194,8 +183,16 @@ class AsyncRedisProxy:
                 await self.connection_pool.release(upstream_reader, upstream_writer)
                 pool_stats = await self.connection_pool.get_stats()
                 logger.debug(f"Returned upstream connection to pool for client #{connection_id} (pool: {pool_stats['pool_size']}/{pool_stats['max_size']})")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to release upstream connection for client #{connection_id}: {e}")
+                if self.metrics:
+                    self.metrics.record_error('connection_release_error')
+                try:
+                    if not upstream_writer.is_closing():
+                        upstream_writer.close()
+                        await upstream_writer.wait_closed()
+                except Exception as close_error:
+                    logger.warning(f"Error closing unreleased connection: {close_error}")
     
     async def start_server(self):
         """Start the async transparent proxy server"""

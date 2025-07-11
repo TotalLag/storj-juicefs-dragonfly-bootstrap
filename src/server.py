@@ -93,9 +93,13 @@ class AsyncServerManager:
         # Start metrics server
         try:
             self.metrics = await start_metrics_server(self.proxy, metrics_port=self.config.metrics_port)
+            # Set the metrics instance in the proxy so it can record metrics
+            self.proxy.set_metrics(self.metrics)
             logger.info("Prometheus metrics server initialized")
         except Exception as e:
             logger.warning(f"Failed to start metrics server: {e}")
+            # Ensure proxy has None metrics if initialization failed
+            self.proxy.set_metrics(None)
         
         logger.info("Async Redis proxy initialized")
     

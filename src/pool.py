@@ -179,7 +179,7 @@ class AsyncConnectionPool:
                 connection = self.pool.get_nowait()
                 async with self.lock:
                     self.stats['pool_hits'] += 1
-                    self.stats['current_size'] -= 1
+                    # Don't decrement current_size here - it should reflect actual pool contents
                 
                 reader, writer = connection
                 
@@ -195,6 +195,7 @@ class AsyncConnectionPool:
                     async with self.lock:
                         self.stats['failed_health_checks'] += 1
                         self.stats['connections_closed'] += 1
+                        self.stats['current_size'] -= 1  # Decrement only when connection is actually removed
                     logger.debug("Discarded unhealthy connection")
                     writer.close()
                     await writer.wait_closed()
@@ -230,6 +231,8 @@ class AsyncConnectionPool:
                 async with self.lock:
                     self.stats['failed_health_checks'] += 1
                     self.stats['connections_closed'] += 1
+                    # Don't decrement current_size here as connection was never in pool
+                logger.warning(f"Health check failed during release - Socket error: {writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) if writer.get_extra_info('socket') else 'No socket'}")
                 logger.debug("Closing unhealthy connection instead of returning to pool")
                 writer.close()
                 await writer.wait_closed()
@@ -239,12 +242,13 @@ class AsyncConnectionPool:
             try:
                 self.pool.put_nowait((reader, writer))
                 async with self.lock:
-                    self.stats['current_size'] += 1
+                    self.stats['current_size'] += 1  # Increment when connection is added to pool
                 logger.debug(f"Returned connection to pool (pool size: {self.pool.qsize()}/{self.size})")
             except asyncio.QueueFull:
                 # Pool is full, close the connection
                 async with self.lock:
                     self.stats['connections_closed'] += 1
+                    # Don't decrement current_size as connection was never added to pool
                 writer.close()
                 await writer.wait_closed()
                 logger.debug(f"Pool full, closed connection (pool size: {self.pool.qsize()}/{self.size})")
@@ -307,6 +311,15 @@ class AsyncConnectionPool:
         """Get pool statistics."""
         async with self.lock:
             stats = self.stats.copy()
-        stats['pool_size'] = self.pool.qsize()
+        
+        # Use actual queue size for accurate metrics
+        actual_pool_size = self.pool.qsize()
+        stats['pool_size'] = actual_pool_size
         stats['max_size'] = self.size
+        
+        # Sync current_size with actual pool size to prevent drift
+        async with self.lock:
+            self.stats['current_size'] = actual_pool_size
+        stats['current_size'] = actual_pool_size
+        
         return stats

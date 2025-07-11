@@ -65,6 +65,11 @@ class ProxyMetrics:
             'Maximum pool size configured'
         )
         
+        self.pool_size_available = Gauge(
+            'redis_proxy_pool_size_available',
+            'Number of connections currently available in the pool'
+        )
+        
         self.pool_hits = Gauge(
             'redis_proxy_pool_hits_total',
             'Total number of pool hits (connections retrieved from pool)'
@@ -86,7 +91,7 @@ class ProxyMetrics:
         self.errors_total = Gauge(
             'redis_proxy_errors_total',
             'Total number of errors',
-            ['type']  # 'connection_error', 'auth_error', 'proxy_error'
+            ['type']  # 'connection_error', 'auth_error', 'proxy_error', 'connection_release_error'
         )
     
     async def start_metrics_server(self):
@@ -131,8 +136,9 @@ class ProxyMetrics:
                 stats = await self.proxy.get_pool_stats()
                 
                 # Update pool metrics
-                self.pool_size_current.set(stats.get('pool_size', 0))
+                self.pool_size_current.set(stats.get('current_size', 0))
                 self.pool_size_max.set(stats.get('max_size', 0))
+                self.pool_size_available.set(stats.get('pool_size', 0))  # Fix: Add pool_size_available metric
                 
                 # Update counters (these are cumulative, so we set them to current values)
                 self.pool_connections_reused.set(stats.get('reused', 0))
