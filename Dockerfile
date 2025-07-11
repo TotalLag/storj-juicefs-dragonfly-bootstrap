@@ -22,4 +22,4 @@ COPY src/ src/
 EXPOSE 8080
 
 # Command to run the application using Gunicorn
-CMD ["gunicorn", "src.proxy:app", "--bind", "0.0.0.0:$PORT"]
+CMD ["gunicorn", "src.server:app", "--bind", "0.0.0.0:$PORT"]

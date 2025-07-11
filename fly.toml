@@ -19,12 +19,12 @@ primary_region = 'iad'
   # STORJ_BUCKET_URL = "your-storj-bucket-url"
   
   # Redis Proxy Configuration (REQUIRED for proxy process)
-  PROXY_PASSWORD = "your-secure-proxy-password"
+  # PROXY_PASSWORD = "your-secure-proxy-password"
   # REDIS_URL = "redis://username:password@host:port"  # This should already be set if using Fly Upstash else Set via: fly secrets set REDIS_URL=your-redis-url
 
 [processes]
-  app = 'python src/proxy.py'
-  web = 'gunicorn src.proxy:app --bind 0.0.0.0:8080'
+  app = 'python -m src.server'
+  web = 'gunicorn src.server:app --bind 0.0.0.0:8080'
 
 [[services]]
   protocol = "tcp"
@@ -67,6 +67,11 @@ primary_region = 'iad'
     timeout = "2s"
     port = 6379
     grace_period = "1s"
+
+[metrics]
+  port = 9090
+  path = "/metrics"
+  processes = ["app"]
 
 [[vm]]
   size = 'shared-cpu-1x'
