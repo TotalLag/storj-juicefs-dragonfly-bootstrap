@@ -97,7 +97,15 @@ def load_config() -> Config:
     redis_port_str = os.getenv("REDIS_PORT")
     redis_username = os.getenv("REDIS_USERNAME")
     redis_password = os.getenv("REDIS_PASSWORD")
-    
+
+    if not redis_url and not (redis_host and redis_port_str):
+        logging.info("REDIS_URL not set, defaulting to redis://localhost:6379")
+        dragonfly_password = os.getenv("DRAGONFLY_PASSWORD")
+        if dragonfly_password:
+            redis_url = f"redis://:{dragonfly_password}@localhost:6379"
+        else:
+            redis_url = "redis://localhost:6379"
+
     if redis_url:
         parsed = urlparse(redis_url)
         if not redis_host:
@@ -111,9 +119,11 @@ def load_config() -> Config:
 
     if not proxy_password:
         raise ConfigError("PROXY_PASSWORD environment variable is missing")
-    
-    if not (redis_url or (redis_host and redis_port_str)):
-        raise ConfigError("Redis upstream credentials are missing. Set REDIS_URL or REDIS_HOST and REDIS_PORT.")
+
+    if not (redis_host and redis_port_str):
+        raise ConfigError(
+            "Redis upstream credentials are missing. Set REDIS_URL or REDIS_HOST and REDIS_PORT."
+        )
 
     redis_port = int(redis_port_str) if redis_port_str else None
     pool_size = int(os.getenv("REDIS_POOL_SIZE", "1000"))
