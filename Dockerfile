@@ -1,44 +1,50 @@
-# Stage 1: Download and unpack DragonflyDB
-FROM debian:stable-slim AS dragonflydb
+# Stage 1: Builder stage for downloading and preparing dependencies
+FROM python:3.12-slim AS builder
 
-RUN apt-get update && apt-get install -y curl tar unzip && rm -rf /var/lib/apt/lists/*
-
-# Create folder and download tarball
-RUN mkdir /dragonfly && \
-    curl -L https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz -o dragonfly.tar.gz && \
-    tar -xvf dragonfly.tar.gz && \
-    mv dragonfly-x86_64 /dragonfly
-
-# Stage 2: Main app image
-FROM python:3.11-slim
-
-WORKDIR /app
-
+# Install build-time dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    tar \
     unzip \
     && rm -rf /var/lib/apt/lists/*
-
-# Install JuiceFS
-RUN curl -sSL https://d.juicefs.com/install | sh -
 
 # Install AWS CLI
 RUN pip install awscli
 
-# Copy renamed Dragonfly binary
-COPY --from=dragonflydb /dragonfly/dragonfly-x86_64 /usr/local/bin/dragonfly
+# Install DragonflyDB
+RUN curl -L https://github.com/dragonflydb/dragonfly/releases/latest/download/dragonfly-x86_64.tar.gz -o dragonfly.tar.gz && \
+    tar -xvf dragonfly.tar.gz && \
+    mv dragonfly-x86_64 /usr/local/bin/dragonfly && \
+    chmod +x /usr/local/bin/dragonfly && \
+    rm dragonfly.tar.gz
 
-# Make sure it’s executable
-RUN chmod +x /usr/local/bin/dragonfly
+# Install JuiceFS
+RUN curl -sSL https://d.juicefs.com/install | sh -
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Stage 2: Final stage for the runtime environment
+FROM python:3.12-slim-bookworm
 
-# Copy application code
-COPY src/ src/
+# Set the working directory
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    fuse3 \
+    ca-certificates \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binaries and dependencies from the builder stage
+COPY --from=builder /usr/local/bin/dragonfly /usr/local/bin/dragonfly
+COPY --from=builder /usr/local/bin/juicefs /usr/local/bin/juicefs
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin/aws /usr/local/bin/aws
+
+# Copy the startup script
 COPY start.sh .
 
-EXPOSE 8080
+# Make the startup script executable
+RUN chmod +x /app/start.sh
 
+# Set the entrypoint for the container
 ENTRYPOINT ["/app/start.sh"]
